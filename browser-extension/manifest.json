@@ -1,0 +1,40 @@
+{
+  "manifest_version": 3,
+  "name": "ListingWriter",
+  "version": "1.0.0",
+  "description": "AI-powered marketplace listing generator. Upload photos, get optimized descriptions instantly.",
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "ListingWriter"
+  },
+  "permissions": [
+    "activeTab",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://craigslist.org/*",
+    "https://*.craigslist.org/*",
+    "https://www.facebook.com/marketplace/*",
+    "https://offerup.com/*",
+    "https://www.mercari.com/*",
+    "https://poshmark.com/*",
+    "https://www.ebay.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.craigslist.org/*",
+        "https://www.facebook.com/marketplace/*",
+        "https://offerup.com/*",
+        "https://www.mercari.com/*",
+        "https://poshmark.com/*",
+        "https://www.ebay.com/*"
+      ],
+      "js": ["content.js"],
+      "css": ["content.css"]
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  }
+}

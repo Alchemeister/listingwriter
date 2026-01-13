@@ -2,6 +2,12 @@
 
 # dependencies
 node_modules/
+api-backend/node_modules/
+
+# Claude
+.claude/
+tmpclaude-*
+**/tmpclaude-*
 
 # Expo
 .expo/
