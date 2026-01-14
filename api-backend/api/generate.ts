@@ -17,8 +17,8 @@ const SECURITY_CONFIG = {
   allowedConditions: ['New', 'Like New', 'Good', 'Fair', 'Parts'],
   allowedCategories: ['Furniture', 'Electronics', 'Clothing', 'Auto', 'Home', 'Sports', 'Other'],
   freeTierLimit: 5, // Per month
-  rateLimitRequests: 10, // Per window
-  rateLimitWindow: '1 h' as const, // 10 requests per hour per IP
+  rateLimitRequests: 30, // Per window
+  rateLimitWindow: '1 m' as const, // 30 requests per minute per IP (burst protection)
 };
 
 // =============================================================================
@@ -668,8 +668,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (!rateLimitResult.success) {
       res.status(429).json({
         success: false,
-        error: 'Too many requests. Please try again later.',
-        retryAfter: 3600, // 1 hour
+        error: 'Too many requests. Please wait a moment.',
+        retryAfter: 60, // 1 minute
       });
       return;
     }

@@ -192,7 +192,7 @@ interface SalesAnalytics {
 
 ### Security Layers (5-Layer Defense)
 
-1. **Rate Limiting** - Upstash Redis, 10 requests/hour per IP
+1. **Rate Limiting** - Upstash Redis, 30 requests/minute per IP (burst protection)
 2. **Authentication** - Supabase JWT verification on every request
 3. **Usage Limits** - Server-side enforcement (not client-side!)
 4. **Input Validation** - Sanitization, type checking, allow-lists
@@ -223,8 +223,8 @@ const SECURITY_CONFIG = {
   allowedConditions: ['New', 'Like New', 'Good', 'Fair', 'Parts'],
   allowedCategories: ['Furniture', 'Electronics', 'Clothing', 'Auto', 'Home', 'Sports', 'Other'],
   freeTierLimit: 5,
-  rateLimitRequests: 10,
-  rateLimitWindow: '1 h',
+  rateLimitRequests: 30,
+  rateLimitWindow: '1 m',
 };
 ```
 
