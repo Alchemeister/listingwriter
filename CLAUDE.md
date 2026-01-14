@@ -190,15 +190,27 @@ interface SalesAnalytics {
 
 ## Security
 
+### Security Layers (5-Layer Defense)
+
+1. **Rate Limiting** - Upstash Redis, 10 requests/hour per IP
+2. **Authentication** - Supabase JWT verification on every request
+3. **Usage Limits** - Server-side enforcement (not client-side!)
+4. **Input Validation** - Sanitization, type checking, allow-lists
+5. **Security Headers** - CSP, X-Frame-Options, HSTS, etc.
+
 ### Backend Security (Implemented)
-- Input validation for all fields
-- String sanitization (XSS prevention)
-- Base64 image validation
-- Size limits (5MB per image, 3 images max)
-- Length limits (200 char item name, 1000 char details)
-- Allowed values whitelist (conditions, categories)
-- Security headers (X-Content-Type-Options, X-Frame-Options, CSP, etc.)
-- No internal error details exposed to client
+- [x] Rate limiting (Upstash Redis)
+- [x] JWT authentication (Supabase)
+- [x] Server-side usage tracking (can't bypass free tier)
+- [x] Input validation for all fields
+- [x] String sanitization (XSS prevention)
+- [x] Base64 image validation
+- [x] Size limits (5MB per image, 3 images max)
+- [x] Length limits (200 char item name, 1000 char details)
+- [x] Allowed values whitelist (conditions, categories)
+- [x] Security headers (X-Content-Type-Options, X-Frame-Options, CSP, etc.)
+- [x] No internal error details exposed to client
+- [x] Generic error messages to users
 
 ### Security Config
 ```typescript
@@ -210,7 +222,21 @@ const SECURITY_CONFIG = {
   maxPriceValue: 1000000,
   allowedConditions: ['New', 'Like New', 'Good', 'Fair', 'Parts'],
   allowedCategories: ['Furniture', 'Electronics', 'Clothing', 'Auto', 'Home', 'Sports', 'Other'],
+  freeTierLimit: 5,
+  rateLimitRequests: 10,
+  rateLimitWindow: '1 h',
 };
+```
+
+### Required Environment Variables (Production)
+```bash
+# api-backend/.env.local
+ANTHROPIC_API_KEY=sk-ant-...
+UPSTASH_REDIS_REST_URL=https://...
+UPSTASH_REDIS_REST_TOKEN=...
+SUPABASE_URL=https://...
+SUPABASE_SERVICE_ROLE_KEY=...
+ALLOWED_ORIGIN=https://your-app.com
 ```
 
 ---
@@ -318,12 +344,13 @@ Desktop layouts:
 - Test desktop and mobile widths on web
 - Keep security validation in sync with frontend
 - Handle loading and error states
+- Run SECURITY_AUDIT.md checklist before deploying
 
 **Don't:**
-- Don't add auth until Pro tier is needed
-- Don't add payments until there's user demand
 - Don't expose internal error details to users
 - Don't skip input validation
+- Don't add payments until there's user demand
+- Don't trust client-side checks for security (always verify server-side)
 
 ---
 

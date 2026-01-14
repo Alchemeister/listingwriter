@@ -1,5 +1,8 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import Anthropic from '@anthropic-ai/sdk';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import { Ratelimit } from '@upstash/ratelimit';
+import { Redis } from '@upstash/redis';
 
 // =============================================================================
 // SECURITY CONFIG
@@ -13,6 +16,9 @@ const SECURITY_CONFIG = {
   maxPriceValue: 1000000,
   allowedConditions: ['New', 'Like New', 'Good', 'Fair', 'Parts'],
   allowedCategories: ['Furniture', 'Electronics', 'Clothing', 'Auto', 'Home', 'Sports', 'Other'],
+  freeTierLimit: 5, // Per month
+  rateLimitRequests: 10, // Per window
+  rateLimitWindow: '1 h' as const, // 10 requests per hour per IP
 };
 
 // =============================================================================
@@ -65,9 +71,203 @@ interface GenerationResult {
   };
 }
 
+interface UserProfile {
+  id: string;
+  tier: 'free' | 'pro' | 'pro_plus';
+}
+
+// =============================================================================
+// SERVICE INITIALIZATION
+// =============================================================================
+
+let ratelimit: Ratelimit | null = null;
+let supabase: SupabaseClient | null = null;
+
+function getRateLimiter(): Ratelimit | null {
+  if (ratelimit) return ratelimit;
+
+  if (!process.env.UPSTASH_REDIS_REST_URL || !process.env.UPSTASH_REDIS_REST_TOKEN) {
+    console.warn('Rate limiting disabled: UPSTASH_REDIS_REST_URL or UPSTASH_REDIS_REST_TOKEN not set');
+    return null;
+  }
+
+  ratelimit = new Ratelimit({
+    redis: new Redis({
+      url: process.env.UPSTASH_REDIS_REST_URL,
+      token: process.env.UPSTASH_REDIS_REST_TOKEN,
+    }),
+    limiter: Ratelimit.slidingWindow(SECURITY_CONFIG.rateLimitRequests, SECURITY_CONFIG.rateLimitWindow),
+    analytics: true,
+    prefix: 'listingwriter',
+  });
+
+  return ratelimit;
+}
+
+function getSupabase(): SupabaseClient | null {
+  if (supabase) return supabase;
+
+  if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
+    console.warn('Auth disabled: SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set');
+    return null;
+  }
+
+  supabase = createClient(
+    process.env.SUPABASE_URL,
+    process.env.SUPABASE_SERVICE_ROLE_KEY
+  );
+
+  return supabase;
+}
+
 // =============================================================================
 // SECURITY HELPERS
 // =============================================================================
+
+function getClientIP(req: VercelRequest): string {
+  const forwarded = req.headers['x-forwarded-for'];
+  if (typeof forwarded === 'string') {
+    return forwarded.split(',')[0].trim();
+  }
+  if (Array.isArray(forwarded)) {
+    return forwarded[0];
+  }
+  return req.headers['x-real-ip'] as string || 'unknown';
+}
+
+async function checkRateLimit(req: VercelRequest): Promise<{ success: boolean; remaining?: number }> {
+  const limiter = getRateLimiter();
+  if (!limiter) {
+    // Rate limiting not configured - allow but log warning
+    return { success: true };
+  }
+
+  const ip = getClientIP(req);
+  const result = await limiter.limit(ip);
+
+  return {
+    success: result.success,
+    remaining: result.remaining,
+  };
+}
+
+async function authenticateUser(req: VercelRequest): Promise<{ user: UserProfile | null; error?: string }> {
+  const sb = getSupabase();
+  if (!sb) {
+    // Auth not configured - allow anonymous with free tier
+    return { user: null };
+  }
+
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith('Bearer ')) {
+    return { user: null, error: 'Missing authorization header' };
+  }
+
+  const token = authHeader.substring(7);
+
+  try {
+    // Verify the JWT and get user
+    const { data: { user }, error } = await sb.auth.getUser(token);
+
+    if (error || !user) {
+      return { user: null, error: 'Invalid or expired token' };
+    }
+
+    // Get user profile with tier
+    const { data: profile } = await sb.from('profiles')
+      .select('tier')
+      .eq('id', user.id)
+      .single();
+
+    return {
+      user: {
+        id: user.id,
+        tier: profile?.tier || 'free',
+      }
+    };
+  } catch (error) {
+    console.error('Auth error:', error);
+    return { user: null, error: 'Authentication failed' };
+  }
+}
+
+async function checkUsageLimit(userId: string | null): Promise<{ allowed: boolean; remaining: number; tier: string }> {
+  const sb = getSupabase();
+
+  // No Supabase = no server-side tracking, fall back to allowing (client tracks)
+  if (!sb || !userId) {
+    return { allowed: true, remaining: SECURITY_CONFIG.freeTierLimit, tier: 'free' };
+  }
+
+  const now = new Date();
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
+
+  try {
+    // Get user tier
+    const { data: profile } = await sb.from('profiles')
+      .select('tier')
+      .eq('id', userId)
+      .single();
+
+    const tier = profile?.tier || 'free';
+
+    // Pro users have unlimited
+    if (tier === 'pro' || tier === 'pro_plus') {
+      return { allowed: true, remaining: Infinity, tier };
+    }
+
+    // Get current month usage
+    const { data: usage } = await sb.from('usage')
+      .select('count')
+      .eq('user_id', userId)
+      .gte('period_start', monthStart)
+      .single();
+
+    const currentCount = usage?.count || 0;
+    const remaining = Math.max(0, SECURITY_CONFIG.freeTierLimit - currentCount);
+
+    return {
+      allowed: currentCount < SECURITY_CONFIG.freeTierLimit,
+      remaining,
+      tier,
+    };
+  } catch (error) {
+    console.error('Usage check error:', error);
+    // On error, allow but log
+    return { allowed: true, remaining: 0, tier: 'free' };
+  }
+}
+
+async function incrementUsage(userId: string | null): Promise<void> {
+  const sb = getSupabase();
+  if (!sb || !userId) return;
+
+  const now = new Date();
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
+
+  try {
+    // Upsert usage record
+    const { data: existing } = await sb.from('usage')
+      .select('id, count')
+      .eq('user_id', userId)
+      .gte('period_start', monthStart)
+      .single();
+
+    if (existing) {
+      await sb.from('usage')
+        .update({ count: existing.count + 1, updated_at: now.toISOString() })
+        .eq('id', existing.id);
+    } else {
+      await sb.from('usage').insert({
+        user_id: userId,
+        count: 1,
+        period_start: monthStart,
+      });
+    }
+  } catch (error) {
+    console.error('Usage increment error:', error);
+  }
+}
 
 function sanitizeString(input: string, maxLength: number): string {
   if (typeof input !== 'string') return '';
@@ -184,9 +384,9 @@ function validateInput(input: unknown): { valid: boolean; error?: string; saniti
 }
 
 function setSecurityHeaders(res: VercelResponse): void {
-  // CORS headers
+  // CORS headers - restrict in production!
   res.setHeader('Access-Control-Allow-Credentials', 'true');
-  res.setHeader('Access-Control-Allow-Origin', '*'); // In production, restrict to your domain
+  res.setHeader('Access-Control-Allow-Origin', process.env.ALLOWED_ORIGIN || '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
@@ -461,7 +661,47 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const startTime = Date.now();
 
   try {
-    // Validate and sanitize input
+    // ==========================================================================
+    // SECURITY LAYER 1: Rate Limiting (by IP)
+    // ==========================================================================
+    const rateLimitResult = await checkRateLimit(req);
+    if (!rateLimitResult.success) {
+      res.status(429).json({
+        success: false,
+        error: 'Too many requests. Please try again later.',
+        retryAfter: 3600, // 1 hour
+      });
+      return;
+    }
+
+    // ==========================================================================
+    // SECURITY LAYER 2: Authentication (optional but recommended)
+    // ==========================================================================
+    const { user, error: authError } = await authenticateUser(req);
+
+    // If auth is configured but failed, reject
+    if (authError && getSupabase()) {
+      res.status(401).json({ success: false, error: authError });
+      return;
+    }
+
+    // ==========================================================================
+    // SECURITY LAYER 3: Usage Limits (server-side enforcement)
+    // ==========================================================================
+    const usageCheck = await checkUsageLimit(user?.id || null);
+    if (!usageCheck.allowed) {
+      res.status(403).json({
+        success: false,
+        error: 'Monthly limit reached. Upgrade to Pro for unlimited listings.',
+        remaining: 0,
+        tier: usageCheck.tier,
+      });
+      return;
+    }
+
+    // ==========================================================================
+    // SECURITY LAYER 4: Input Validation & Sanitization
+    // ==========================================================================
     const validation = validateInput(req.body);
     if (!validation.valid || !validation.sanitized) {
       res.status(400).json({ success: false, error: validation.error || 'Invalid input' });
@@ -479,7 +719,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-    console.log('Starting multi-agent generation...');
+    console.log(`Starting generation for user: ${user?.id || 'anonymous'}`);
 
     // AGENT 1: Analyze images
     console.log('Agent 1: Analyzing images...');
@@ -498,6 +738,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const processingTimeMs = Date.now() - startTime;
     console.log(`Generation complete in ${processingTimeMs}ms`);
 
+    // ==========================================================================
+    // SECURITY LAYER 5: Increment Usage (server-side tracking)
+    // ==========================================================================
+    await incrementUsage(user?.id || null);
+
     // Add metadata
     const result: GenerationResult = {
       ...listings,
@@ -511,6 +756,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     res.status(200).json({
       success: true,
       listings: result,
+      remaining: usageCheck.remaining - 1,
+      tier: usageCheck.tier,
     });
   } catch (error) {
     console.error('Generation error:', error);
