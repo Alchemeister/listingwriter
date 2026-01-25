@@ -383,10 +383,17 @@ function validateInput(input: unknown): { valid: boolean; error?: string; saniti
   return { valid: true, sanitized };
 }
 
-function setSecurityHeaders(res: VercelResponse): void {
-  // CORS headers - restrict in production!
+function setSecurityHeaders(res: VercelResponse): boolean {
+  const allowedOrigin = process.env.ALLOWED_ORIGIN;
+
+  // Fail-safe: reject if ALLOWED_ORIGIN not configured (prevents accidental open API)
+  if (!allowedOrigin) {
+    return false;
+  }
+
+  // CORS headers
   res.setHeader('Access-Control-Allow-Credentials', 'true');
-  res.setHeader('Access-Control-Allow-Origin', process.env.ALLOWED_ORIGIN || '*');
+  res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
@@ -402,6 +409,8 @@ function setSecurityHeaders(res: VercelResponse): void {
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
+
+  return true;
 }
 
 // =============================================================================
@@ -644,7 +653,14 @@ async function writeCopy(
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   // Set security headers for all responses
-  setSecurityHeaders(res);
+  const headersOk = setSecurityHeaders(res);
+
+  // Fail-safe: reject all requests if ALLOWED_ORIGIN not configured
+  if (!headersOk) {
+    console.error('ALLOWED_ORIGIN environment variable not set');
+    res.status(500).json({ success: false, error: 'Server misconfigured' });
+    return;
+  }
 
   // Handle CORS preflight
   if (req.method === 'OPTIONS') {
